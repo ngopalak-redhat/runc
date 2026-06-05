@@ -343,10 +343,12 @@ func mountFd(nsHandles *userns.Handles, m *configs.Mount) (_ *mountSource, retEr
 		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: Calling mount_setattr for %s with userns_fd=%d, flags=%v",
 			m.Source, usernsFile.Fd(), setAttrFlags))
 
-		if err := unix.MountSetattr(int(mountFile.Fd()), "", setAttrFlags, &unix.MountAttr{
+		mountAttr := &unix.MountAttr{
 			Attr_set:  unix.MOUNT_ATTR_IDMAP,
 			Userns_fd: uint64(usernsFile.Fd()),
-		}); err != nil {
+		}
+
+		if err := unix.MountSetattr(int(mountFile.Fd()), "", setAttrFlags, mountAttr); err != nil {
 			extraMsg := ""
 			if err == unix.EINVAL {
 				extraMsg = " (maybe the filesystem used doesn't support idmap mounts on this kernel?)"
@@ -357,7 +359,15 @@ func mountFd(nsHandles *userns.Handles, m *configs.Mount) (_ *mountSource, retEr
 		}
 
 		// DEBUG: Log success
-		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SUCCESS for %s", m.Source))
+		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SUCCESS (call 1) for %s", m.Source))
+
+		// TEST IDEMPOTENCY: Call mount_setattr AGAIN with same parameters
+		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: Calling mount_setattr SECOND TIME for %s to test idempotency", m.Source))
+		if err := unix.MountSetattr(int(mountFile.Fd()), "", setAttrFlags, mountAttr); err != nil {
+			debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SECOND CALL FAILED for %s: %v", m.Source, err))
+			return nil, fmt.Errorf("failed to set MOUNT_ATTR_IDMAP on second call for %s: %w", m.Source, err)
+		}
+		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SUCCESS (call 2) for %s - idempotency test passed", m.Source))
 	} else {
 		var err error
 		mountFile, err = os.OpenFile(m.Source, unix.O_PATH|unix.O_CLOEXEC, 0)
