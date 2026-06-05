@@ -359,15 +359,61 @@ func mountFd(nsHandles *userns.Handles, m *configs.Mount) (_ *mountSource, retEr
 		}
 
 		// DEBUG: Log success
-		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SUCCESS (call 1) for %s", m.Source))
+		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SUCCESS for %s", m.Source))
 
-		// TEST IDEMPOTENCY: Call mount_setattr AGAIN with same parameters
-		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: Calling mount_setattr SECOND TIME for %s to test idempotency", m.Source))
-		if err := unix.MountSetattr(int(mountFile.Fd()), "", setAttrFlags, mountAttr); err != nil {
-			debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SECOND CALL FAILED for %s: %v", m.Source, err))
-			return nil, fmt.Errorf("failed to set MOUNT_ATTR_IDMAP on second call for %s: %w", m.Source, err)
+		// TEST: Create a SECOND detached mount from the SAME source and apply mount_setattr
+		// This simulates what happens when a container restarts after CRI-O restart
+		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: Creating SECOND detached mount from %s to test kernel behavior", m.Source))
+
+		flags2 := uint(unix.OPEN_TREE_CLONE | unix.OPEN_TREE_CLOEXEC)
+		if m.Flags&unix.MS_REC == unix.MS_REC {
+			flags2 |= unix.AT_RECURSIVE
 		}
-		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SUCCESS (call 2) for %s - idempotency test passed", m.Source))
+		fd2, err := unix.OpenTree(unix.AT_FDCWD, m.Source, flags2)
+		if err != nil {
+			debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: SECOND open_tree FAILED for %s: %v", m.Source, err))
+		} else {
+			mountFile2 := os.NewFile(uintptr(fd2), m.Source+"_second")
+			defer mountFile2.Close()
+
+			debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: SECOND open_tree SUCCESS, now calling mount_setattr on second mount"))
+
+			// Create a new userns handle for the second mount
+			var usernsFile2 *os.File
+			if m.IDMapping.UserNSPath == "" {
+				usernsFile2, err = nsHandles.Get(userns.Mapping{
+					UIDMappings: m.IDMapping.UIDMappings,
+					GIDMappings: m.IDMapping.GIDMappings,
+				})
+				if err != nil {
+					debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: Failed to create userns for second mount: %v", err))
+					usernsFile2 = nil
+				}
+			} else {
+				usernsFile2, err = os.Open(m.IDMapping.UserNSPath)
+				if err != nil {
+					debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: Failed to open userns for second mount: %v", err))
+					usernsFile2 = nil
+				}
+			}
+
+			if usernsFile2 != nil {
+				defer usernsFile2.Close()
+
+				mountAttr2 := &unix.MountAttr{
+					Attr_set:  unix.MOUNT_ATTR_IDMAP,
+					Userns_fd: uint64(usernsFile2.Fd()),
+				}
+
+				if err := unix.MountSetattr(int(mountFile2.Fd()), "", setAttrFlags, mountAttr2); err != nil {
+					debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: SECOND mount_setattr FAILED for %s: %v", m.Source, err))
+				} else {
+					debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: SECOND mount_setattr SUCCESS for %s - closing second mount now", m.Source))
+				}
+			}
+		}
+
+		debugLog(fmt.Sprintf("[DEBUG-RUNC-IDMAP] mountFd: Continuing with FIRST mount for actual use"))
 	} else {
 		var err error
 		mountFile, err = os.OpenFile(m.Source, unix.O_PATH|unix.O_CLOEXEC, 0)
