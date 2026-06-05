@@ -293,6 +293,16 @@ func mountFd(nsHandles *userns.Handles, m *configs.Mount) (_ *mountSource, retEr
 		sourceType = mountSourceOpenTree
 
 		// Configure the id mapping.
+		// DEBUG: Log ID mapping configuration
+		logrus.Infof("[DEBUG-RUNC-IDMAP] mountFd: dest=%s, src=%s, hasUIDMappings=%v, hasGIDMappings=%v",
+			m.Destination, m.Source, len(m.IDMapping.UIDMappings) > 0, len(m.IDMapping.GIDMappings) > 0)
+		if len(m.IDMapping.UIDMappings) > 0 {
+			logrus.Infof("[DEBUG-RUNC-IDMAP] mountFd: UIDMappings=%+v", m.IDMapping.UIDMappings)
+		}
+		if len(m.IDMapping.GIDMappings) > 0 {
+			logrus.Infof("[DEBUG-RUNC-IDMAP] mountFd: GIDMappings=%+v", m.IDMapping.GIDMappings)
+		}
+
 		var usernsFile *os.File
 		if m.IDMapping.UserNSPath == "" {
 			usernsFile, err = nsHandles.Get(userns.Mapping{
@@ -318,6 +328,11 @@ func mountFd(nsHandles *userns.Handles, m *configs.Mount) (_ *mountSource, retEr
 		if m.IDMapping.Recursive {
 			setAttrFlags |= unix.AT_RECURSIVE
 		}
+
+		// DEBUG: Log before mount_setattr
+		logrus.Infof("[DEBUG-RUNC-IDMAP] mountFd: Calling mount_setattr for %s with userns_fd=%d, flags=%v",
+			m.Source, usernsFile.Fd(), setAttrFlags)
+
 		if err := unix.MountSetattr(int(mountFile.Fd()), "", setAttrFlags, &unix.MountAttr{
 			Attr_set:  unix.MOUNT_ATTR_IDMAP,
 			Userns_fd: uint64(usernsFile.Fd()),
@@ -327,8 +342,12 @@ func mountFd(nsHandles *userns.Handles, m *configs.Mount) (_ *mountSource, retEr
 				extraMsg = " (maybe the filesystem used doesn't support idmap mounts on this kernel?)"
 			}
 
+			logrus.Errorf("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr FAILED for %s: %v%s", m.Source, err, extraMsg)
 			return nil, fmt.Errorf("failed to set MOUNT_ATTR_IDMAP on %s: %w%s", m.Source, err, extraMsg)
 		}
+
+		// DEBUG: Log success
+		logrus.Infof("[DEBUG-RUNC-IDMAP] mountFd: mount_setattr SUCCESS for %s", m.Source)
 	} else {
 		var err error
 		mountFile, err = os.OpenFile(m.Source, unix.O_PATH|unix.O_CLOEXEC, 0)
